@@ -260,3 +260,215 @@
 (define-read-only (get-shareholder-vote (land-id uint) (voter principal) (proposal-id uint))
   (map-get? shareholder-votes { land-id: land-id, voter: voter, proposal-id: proposal-id })
 )
+
+(define-map land-valuations
+  { land-id: uint, valuation-id: uint }
+  {
+    appraiser: principal,
+    valuation-amount: uint,
+    valuation-date: uint,
+    valuation-method: (string-ascii 50),
+    is-verified: bool
+  }
+)
+
+(define-map land-valuation-counters
+  { land-id: uint }
+  { counter: uint }
+)
+
+(define-map certified-appraisers
+  { appraiser: principal }
+  { is-certified: bool, certification-date: uint }
+)
+
+(define-public (certify-appraiser (appraiser principal))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (ok (map-set certified-appraisers 
+      { appraiser: appraiser } 
+      { is-certified: true, certification-date: stacks-block-height }))
+  )
+)
+
+(define-public (submit-land-valuation (land-id uint) (valuation-amount uint) (valuation-method (string-ascii 50)))
+  (let
+    (
+      (land-data (unwrap! (map-get? land-registry { land-id: land-id }) ERR_LAND_NOT_FOUND))
+      (appraiser-data (unwrap! (map-get? certified-appraisers { appraiser: tx-sender }) ERR_NOT_AUTHORIZED))
+      (current-counter (default-to u0 (get counter (map-get? land-valuation-counters { land-id: land-id }))))
+      (new-valuation-id (+ current-counter u1))
+    )
+    (asserts! (get is-active land-data) ERR_LAND_NOT_FOUND)
+    (asserts! (get is-certified appraiser-data) ERR_NOT_AUTHORIZED)
+    (asserts! (> valuation-amount u0) ERR_INVALID_PRICE)
+    (map-set land-valuations
+      { land-id: land-id, valuation-id: new-valuation-id }
+      {
+        appraiser: tx-sender,
+        valuation-amount: valuation-amount,
+        valuation-date: stacks-block-height,
+        valuation-method: valuation-method,
+        is-verified: false
+      }
+    )
+    (map-set land-valuation-counters
+      { land-id: land-id }
+      { counter: new-valuation-id }
+    )
+    (ok new-valuation-id)
+  )
+)
+
+(define-public (verify-valuation (land-id uint) (valuation-id uint))
+  (let
+    (
+      (valuation-data (unwrap! (map-get? land-valuations { land-id: land-id, valuation-id: valuation-id }) ERR_LAND_NOT_FOUND))
+    )
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+    (map-set land-valuations
+      { land-id: land-id, valuation-id: valuation-id }
+      (merge valuation-data { is-verified: true })
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-land-valuation (land-id uint) (valuation-id uint))
+  (map-get? land-valuations { land-id: land-id, valuation-id: valuation-id })
+)
+
+(define-read-only (get-valuation-count (land-id uint))
+  (default-to u0 (get counter (map-get? land-valuation-counters { land-id: land-id })))
+)
+
+(define-read-only (is-certified-appraiser (appraiser principal))
+  (default-to false (get is-certified (map-get? certified-appraisers { appraiser: appraiser })))
+)
+
+(define-map land-leases
+  { land-id: uint, lease-id: uint }
+  {
+    lessor: principal,
+    lessee: principal,
+    lease-start: uint,
+    lease-end: uint,
+    monthly-rent: uint,
+    usage-type: (string-ascii 50),
+    is-active: bool,
+    deposit-amount: uint
+  }
+)
+
+(define-map lease-counters
+  { land-id: uint }
+  { counter: uint }
+)
+
+(define-map lease-payments
+  { land-id: uint, lease-id: uint, payment-id: uint }
+  {
+    amount: uint,
+    payment-date: uint,
+    payment-period: (string-ascii 20)
+  }
+)
+
+(define-map lease-payment-counters
+  { land-id: uint, lease-id: uint }
+  { counter: uint }
+)
+
+(define-public (create-lease (land-id uint) (lessee principal) (lease-duration-blocks uint) (monthly-rent uint) (usage-type (string-ascii 50)) (deposit-amount uint))
+  (let
+    (
+      (land-data (unwrap! (map-get? land-registry { land-id: land-id }) ERR_LAND_NOT_FOUND))
+      (current-counter (default-to u0 (get counter (map-get? lease-counters { land-id: land-id }))))
+      (new-lease-id (+ current-counter u1))
+      (lease-end-block (+ stacks-block-height lease-duration-blocks))
+    )
+    (asserts! (is-eq tx-sender (get owner land-data)) ERR_NOT_AUTHORIZED)
+    (asserts! (get is-active land-data) ERR_LAND_NOT_FOUND)
+    (asserts! (> monthly-rent u0) ERR_INVALID_PRICE)
+    (asserts! (> lease-duration-blocks u0) ERR_INVALID_PRICE)
+    (map-set land-leases
+      { land-id: land-id, lease-id: new-lease-id }
+      {
+        lessor: tx-sender,
+        lessee: lessee,
+        lease-start: stacks-block-height,
+        lease-end: lease-end-block,
+        monthly-rent: monthly-rent,
+        usage-type: usage-type,
+        is-active: true,
+        deposit-amount: deposit-amount
+      }
+    )
+    (map-set lease-counters
+      { land-id: land-id }
+      { counter: new-lease-id }
+    )
+    (ok new-lease-id)
+  )
+)
+
+(define-public (terminate-lease (land-id uint) (lease-id uint))
+  (let
+    (
+      (lease-data (unwrap! (map-get? land-leases { land-id: land-id, lease-id: lease-id }) ERR_LAND_NOT_FOUND))
+    )
+    (asserts! (or (is-eq tx-sender (get lessor lease-data)) (is-eq tx-sender (get lessee lease-data))) ERR_NOT_AUTHORIZED)
+    (asserts! (get is-active lease-data) ERR_LAND_NOT_FOUND)
+    (map-set land-leases
+      { land-id: land-id, lease-id: lease-id }
+      (merge lease-data { is-active: false })
+    )
+    (ok true)
+  )
+)
+
+(define-public (record-lease-payment (land-id uint) (lease-id uint) (amount uint) (payment-period (string-ascii 20)))
+  (let
+    (
+      (lease-data (unwrap! (map-get? land-leases { land-id: land-id, lease-id: lease-id }) ERR_LAND_NOT_FOUND))
+      (current-counter (default-to u0 (get counter (map-get? lease-payment-counters { land-id: land-id, lease-id: lease-id }))))
+      (new-payment-id (+ current-counter u1))
+    )
+    (asserts! (is-eq tx-sender (get lessee lease-data)) ERR_NOT_AUTHORIZED)
+    (asserts! (get is-active lease-data) ERR_LAND_NOT_FOUND)
+    (asserts! (< stacks-block-height (get lease-end lease-data)) ERR_LAND_NOT_FOUND)
+    (asserts! (> amount u0) ERR_INVALID_PRICE)
+    (map-set lease-payments
+      { land-id: land-id, lease-id: lease-id, payment-id: new-payment-id }
+      {
+        amount: amount,
+        payment-date: stacks-block-height,
+        payment-period: payment-period
+      }
+    )
+    (map-set lease-payment-counters
+      { land-id: land-id, lease-id: lease-id }
+      { counter: new-payment-id }
+    )
+    (ok new-payment-id)
+  )
+)
+
+(define-read-only (get-lease-info (land-id uint) (lease-id uint))
+  (map-get? land-leases { land-id: land-id, lease-id: lease-id })
+)
+
+(define-read-only (get-lease-count (land-id uint))
+  (default-to u0 (get counter (map-get? lease-counters { land-id: land-id })))
+)
+
+(define-read-only (get-lease-payment (land-id uint) (lease-id uint) (payment-id uint))
+  (map-get? lease-payments { land-id: land-id, lease-id: lease-id, payment-id: payment-id })
+)
+
+(define-read-only (is-lease-active (land-id uint) (lease-id uint))
+  (match (map-get? land-leases { land-id: land-id, lease-id: lease-id })
+    lease-data (and (get is-active lease-data) (< stacks-block-height (get lease-end lease-data)))
+    false
+  )
+)
