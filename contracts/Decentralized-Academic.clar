@@ -12,6 +12,13 @@
 (define-data-var land-id-counter uint u0)
 (define-data-var dispute-id-counter uint u0)
 
+(define-constant ERR_POLICY_NOT_FOUND (err u108))
+(define-constant ERR_POLICY_EXPIRED (err u109))
+(define-constant ERR_CLAIM_EXISTS (err u110))
+
+(define-data-var insurance-policy-counter uint u0)
+(define-data-var insurance-claim-counter uint u0)
+
 (define-map land-registry
   { land-id: uint }
   {
@@ -469,6 +476,125 @@
 (define-read-only (is-lease-active (land-id uint) (lease-id uint))
   (match (map-get? land-leases { land-id: land-id, lease-id: lease-id })
     lease-data (and (get is-active lease-data) (< stacks-block-height (get lease-end lease-data)))
+    false
+  )
+)
+
+(define-map insurance-policies
+  { policy-id: uint }
+  {
+    land-id: uint,
+    policy-holder: principal,
+    insurance-provider: principal,
+    coverage-amount: uint,
+    premium-amount: uint,
+    policy-start: uint,
+    policy-end: uint,
+    policy-type: (string-ascii 30),
+    is-active: bool
+  }
+)
+
+(define-map insurance-claims
+  { claim-id: uint }
+  {
+    policy-id: uint,
+    claimant: principal,
+    claim-amount: uint,
+    claim-description: (string-ascii 200),
+    claim-date: uint,
+    status: (string-ascii 20),
+    approved-amount: (optional uint)
+  }
+)
+
+(define-public (register-insurance-policy (land-id uint) (insurance-provider principal) (coverage-amount uint) (premium-amount uint) (policy-duration-blocks uint) (policy-type (string-ascii 30)))
+  (let
+    (
+      (new-policy-id (+ (var-get insurance-policy-counter) u1))
+      (land-data (unwrap! (map-get? land-registry { land-id: land-id }) ERR_LAND_NOT_FOUND))
+      (policy-end-block (+ stacks-block-height policy-duration-blocks))
+    )
+    (asserts! (is-eq tx-sender (get owner land-data)) ERR_NOT_AUTHORIZED)
+    (asserts! (get is-active land-data) ERR_LAND_NOT_FOUND)
+    (asserts! (> coverage-amount u0) ERR_INVALID_PRICE)
+    (asserts! (> premium-amount u0) ERR_INVALID_PRICE)
+    (map-set insurance-policies
+      { policy-id: new-policy-id }
+      {
+        land-id: land-id,
+        policy-holder: tx-sender,
+        insurance-provider: insurance-provider,
+        coverage-amount: coverage-amount,
+        premium-amount: premium-amount,
+        policy-start: stacks-block-height,
+        policy-end: policy-end-block,
+        policy-type: policy-type,
+        is-active: true
+      }
+    )
+    (var-set insurance-policy-counter new-policy-id)
+    (ok new-policy-id)
+  )
+)
+
+(define-public (file-insurance-claim (policy-id uint) (claim-amount uint) (claim-description (string-ascii 200)))
+  (let
+    (
+      (new-claim-id (+ (var-get insurance-claim-counter) u1))
+      (policy-data (unwrap! (map-get? insurance-policies { policy-id: policy-id }) ERR_POLICY_NOT_FOUND))
+    )
+    (asserts! (is-eq tx-sender (get policy-holder policy-data)) ERR_NOT_AUTHORIZED)
+    (asserts! (get is-active policy-data) ERR_POLICY_EXPIRED)
+    (asserts! (< stacks-block-height (get policy-end policy-data)) ERR_POLICY_EXPIRED)
+    (asserts! (<= claim-amount (get coverage-amount policy-data)) ERR_INVALID_PRICE)
+    (map-set insurance-claims
+      { claim-id: new-claim-id }
+      {
+        policy-id: policy-id,
+        claimant: tx-sender,
+        claim-amount: claim-amount,
+        claim-description: claim-description,
+        claim-date: stacks-block-height,
+        status: "pending",
+        approved-amount: none
+      }
+    )
+    (var-set insurance-claim-counter new-claim-id)
+    (ok new-claim-id)
+  )
+)
+
+(define-public (process-insurance-claim (claim-id uint) (approved-amount uint) (status (string-ascii 20)))
+  (let
+    (
+      (claim-data (unwrap! (map-get? insurance-claims { claim-id: claim-id }) ERR_POLICY_NOT_FOUND))
+      (policy-data (unwrap! (map-get? insurance-policies { policy-id: (get policy-id claim-data) }) ERR_POLICY_NOT_FOUND))
+    )
+    (asserts! (is-eq tx-sender (get insurance-provider policy-data)) ERR_NOT_AUTHORIZED)
+    (asserts! (<= approved-amount (get claim-amount claim-data)) ERR_INVALID_PRICE)
+    (map-set insurance-claims
+      { claim-id: claim-id }
+      (merge claim-data {
+        status: status,
+        approved-amount: (some approved-amount)
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-read-only (get-insurance-policy (policy-id uint))
+  (map-get? insurance-policies { policy-id: policy-id })
+)
+
+(define-read-only (get-insurance-claim (claim-id uint))
+  (map-get? insurance-claims { claim-id: claim-id })
+)
+
+(define-read-only (is-policy-active (policy-id uint))
+  (match (map-get? insurance-policies { policy-id: policy-id })
+    policy-data (and (get is-active policy-data) (< stacks-block-height (get policy-end policy-data)))
     false
   )
 )
